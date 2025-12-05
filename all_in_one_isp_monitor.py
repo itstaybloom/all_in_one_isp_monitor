@@ -4,8 +4,6 @@ from datetime import datetime
 import requests
 from openpyxl import Workbook
 from openpyxl.styles import PatternFill
-import tkinter as tk
-from tkinter import messagebox
 import re
 import os
 import pandas as pd
@@ -16,8 +14,8 @@ import plotly.express as px
 # CONFIG
 # =========================
 LATENCY_WARNING_THRESHOLD = 100
-REPORT_FOLDER = "C:/ping_reports"
-IP_LIST_PATH = r"C:\Users\Akhilesh\Desktop\Python Script\ip_list.txt"
+REPORT_FOLDER = "ping_reports"
+IP_LIST_PATH = "ip_list.txt"
 
 if not os.path.exists(REPORT_FOLDER):
     os.makedirs(REPORT_FOLDER)
@@ -114,32 +112,26 @@ def generate_report():
     )
     wb.save(filename)
 
-    if any_failure:
-        root = tk.Tk()
-        root.withdraw()
-        messagebox.showwarning(
-            "Ping Failure Alert",
-            f"Some IPs have FAILED the ping test!\n\nReport File:\n{filename}"
-        )
-
-    return filename
+    return filename, any_failure
 
 # =========================
 # STREAMLIT DASHBOARD UI
 # =========================
 st.set_page_config(page_title="ISP Monitoring Dashboard", layout="wide")
 
-st.markdown(
-    "<meta http-equiv='refresh' content='60'>",
-    unsafe_allow_html=True
-)
+# Auto-refresh every 60 seconds
+st.experimental_set_query_params(auto_refresh=int(datetime.now().timestamp()))
+st.markdown("<meta http-equiv='refresh' content='60'>", unsafe_allow_html=True)
 
 st.title("🌐 All-in-One Multi-ISP Monitoring Dashboard")
 
 if st.button("▶ Run Ping Test & Generate New Report"):
-    file_created = generate_report()
+    file_created, any_failure = generate_report()
     st.success(f"New Report Created: {file_created}")
+    if any_failure:
+        st.warning("⚠️ Some IPs have FAILED the ping test! Check the report for details.")
 
+# Load latest report
 files = sorted(
     [os.path.join(REPORT_FOLDER, f) for f in os.listdir(REPORT_FOLDER) if f.endswith(".xlsx")],
     reverse=True
@@ -153,12 +145,18 @@ latest_file = files[0]
 latest_df = pd.read_excel(latest_file, sheet_name="Ping Report")
 latest_summary = pd.read_excel(latest_file, sheet_name="Summary")
 
+# =========================
+# Summary Metrics
+# =========================
 col1, col2, col3, col4 = st.columns(4)
 col1.metric("Total IPs", int(latest_summary.iloc[0,1]))
 col2.metric("PASS", int(latest_summary.iloc[1,1]))
 col3.metric("FAIL", int(latest_summary.iloc[2,1]))
 col4.metric("High Latency", int(latest_summary.iloc[3,1]))
 
+# =========================
+# Filter by ISP
+# =========================
 st.subheader("Filter by ISP")
 isp_list = ["All"] + sorted(latest_df["ISP Name"].astype(str).unique().tolist())
 selected_isp = st.selectbox("Select ISP", isp_list)
@@ -174,13 +172,28 @@ st.subheader("Failed Links (Live)")
 st.dataframe(df_live[df_live["Status"] == "FAIL"], use_container_width=True)
 
 # =========================
-# ISP-wise Live Health with Colors
+# ISP-wise Live Health with PASS/FAIL/High Latency
 # =========================
-st.subheader("ISP-wise Live Health")
-isp_summary = df_live.groupby(["ISP Name", "Status"]).size().unstack(fill_value=0).reset_index()
-isp_summary_melt = isp_summary.melt(id_vars="ISP Name", value_vars=["PASS", "FAIL"],
-                                    var_name="Status", value_name="Count")
-color_map = {"PASS": "green", "FAIL": "red"}
+st.subheader("ISP-wise Live Health (PASS / FAIL / High Latency)")
+
+df_live["High Latency"] = df_live["Latency (ms)"].apply(
+    lambda x: 1 if x != "N/A" and float(x) > LATENCY_WARNING_THRESHOLD else 0
+)
+
+isp_summary = df_live.groupby("ISP Name").agg({
+    "PASS": lambda x: sum(x=="PASS"),
+    "FAIL": lambda x: sum(x=="FAIL"),
+    "High Latency": "sum"
+}).reset_index()
+
+isp_summary_melt = isp_summary.melt(
+    id_vars="ISP Name",
+    value_vars=["PASS", "FAIL", "High Latency"],
+    var_name="Status",
+    value_name="Count"
+)
+
+color_map = {"PASS": "green", "FAIL": "red", "High Latency": "yellow"}
 
 fig = px.bar(
     isp_summary_melt,
