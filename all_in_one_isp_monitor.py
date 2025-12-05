@@ -20,11 +20,11 @@ IP_LIST_PATH = "ip_list.txt"
 if not os.path.exists(REPORT_FOLDER):
     os.makedirs(REPORT_FOLDER)
 
-# =========================
-# PING + REPORT FUNCTIONS
-# =========================
 param = "-n" if platform.system().lower() == "windows" else "-c"
 
+# =========================
+# PING FUNCTIONS
+# =========================
 def get_isp(ip):
     try:
         url = f"http://ip-api.com/json/{ip}"
@@ -37,14 +37,12 @@ def ping_ip(ip):
     try:
         command = ["ping", param, "2", ip]
         output = subprocess.check_output(command, universal_newlines=True)
-
         latency = "N/A"
         for line in output.splitlines():
             match = re.search(r"time[=<]([\d\.]+)", line)
             if match:
                 latency = match.group(1)
                 break
-
         return "PASS", latency
     except:
         return "FAIL", "N/A"
@@ -70,7 +68,6 @@ def generate_report():
         status, latency = ping_ip(ip)
         isp = get_isp(ip)
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
         ws.append([ip, isp, status, latency, timestamp])
         row = ws.max_row
 
@@ -102,61 +99,51 @@ def generate_report():
     summary_ws.append(["High Latency (>100ms)", high_latency_count])
     summary_ws.append(["Report Generated At", datetime.now().strftime("%Y-%m-%d %H:%M:%S")])
 
-    for column_cells in summary_ws.columns:
-        max_length = max(len(str(cell.value)) for cell in column_cells)
-        summary_ws.column_dimensions[column_cells[0].column_letter].width = max_length + 3
-
-    filename = os.path.join(
-        REPORT_FOLDER,
-        f"ping_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-    )
+    filename = os.path.join(REPORT_FOLDER, f"ping_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx")
     wb.save(filename)
 
     return filename, any_failure
 
 # =========================
-# STREAMLIT DASHBOARD UI
+# STREAMLIT DASHBOARD
 # =========================
 st.set_page_config(page_title="ISP Monitoring Dashboard", layout="wide")
-
-# Auto-refresh every 60 seconds
-st.experimental_set_query_params(auto_refresh=int(datetime.now().timestamp()))
 st.markdown("<meta http-equiv='refresh' content='60'>", unsafe_allow_html=True)
+st.title("🌐 Multi-ISP Monitoring Dashboard")
 
-st.title("🌐 All-in-One Multi-ISP Monitoring Dashboard")
-
+# Run Ping Test
 if st.button("▶ Run Ping Test & Generate New Report"):
     file_created, any_failure = generate_report()
     st.success(f"New Report Created: {file_created}")
     if any_failure:
         st.warning("⚠️ Some IPs have FAILED the ping test! Check the report for details.")
 
-# Load latest report
-files = sorted(
-    [os.path.join(REPORT_FOLDER, f) for f in os.listdir(REPORT_FOLDER) if f.endswith(".xlsx")],
-    reverse=True
-)
-
+# Load latest report safely
+files = sorted([os.path.join(REPORT_FOLDER, f) for f in os.listdir(REPORT_FOLDER) if f.endswith(".xlsx")], reverse=True)
 if not files:
     st.warning("No reports found yet. Click the button above to generate one.")
     st.stop()
 
 latest_file = files[0]
-latest_df = pd.read_excel(latest_file, sheet_name="Ping Report")
-latest_summary = pd.read_excel(latest_file, sheet_name="Summary")
+try:
+    latest_df = pd.read_excel(latest_file, sheet_name="Ping Report")
+    latest_summary = pd.read_excel(latest_file, sheet_name="Summary")
+except Exception as e:
+    st.error(f"Failed to read Excel file: {e}")
+    st.stop()
 
-# =========================
+def get_summary_value(df, metric_name):
+    val = df.loc[df["Metric"] == metric_name, "Value"]
+    return int(val.values[0]) if not val.empty else 0
+
 # Summary Metrics
-# =========================
 col1, col2, col3, col4 = st.columns(4)
-col1.metric("Total IPs", int(latest_summary.iloc[0,1]))
-col2.metric("PASS", int(latest_summary.iloc[1,1]))
-col3.metric("FAIL", int(latest_summary.iloc[2,1]))
-col4.metric("High Latency", int(latest_summary.iloc[3,1]))
+col1.metric("Total IPs", get_summary_value(latest_summary, "Total IPs Checked"))
+col2.metric("PASS", get_summary_value(latest_summary, "Total PASS"))
+col3.metric("FAIL", get_summary_value(latest_summary, "Total FAIL"))
+col4.metric("High Latency", get_summary_value(latest_summary, "High Latency (>100ms)"))
 
-# =========================
 # Filter by ISP
-# =========================
 st.subheader("Filter by ISP")
 isp_list = ["All"] + sorted(latest_df["ISP Name"].astype(str).unique().tolist())
 selected_isp = st.selectbox("Select ISP", isp_list)
@@ -169,67 +156,58 @@ st.subheader("Live Status Table")
 st.dataframe(df_live, use_container_width=True)
 
 st.subheader("Failed Links (Live)")
-st.dataframe(df_live[df_live["Status"] == "FAIL"], use_container_width=True)
+st.dataframe(df_live[df_live["Status"]=="FAIL"], use_container_width=True)
 
 # =========================
-# ISP-wise Live Health with PASS/FAIL/High Latency
+# Live ISP Health Chart
 # =========================
-st.subheader("ISP-wise Live Health (PASS / FAIL / High Latency)")
+st.subheader("ISP-wise Live Health (Stacked)")
 
-df_live["High Latency"] = df_live["Latency (ms)"].apply(
-    lambda x: 1 if x != "N/A" and float(x) > LATENCY_WARNING_THRESHOLD else 0
-)
-
+df_live["High Latency"] = df_live["Latency (ms)"].apply(lambda x: 1 if x != "N/A" and float(x) > LATENCY_WARNING_THRESHOLD else 0)
 isp_summary = df_live.groupby("ISP Name").agg({
     "PASS": lambda x: sum(x=="PASS"),
     "FAIL": lambda x: sum(x=="FAIL"),
     "High Latency": "sum"
 }).reset_index()
 
-isp_summary_melt = isp_summary.melt(
-    id_vars="ISP Name",
-    value_vars=["PASS", "FAIL", "High Latency"],
-    var_name="Status",
-    value_name="Count"
-)
+isp_summary_melt = isp_summary.melt(id_vars="ISP Name", value_vars=["PASS","FAIL","High Latency"],
+                                    var_name="Status", value_name="Count")
+color_map = {"PASS":"green", "FAIL":"red", "High Latency":"yellow"}
 
-color_map = {"PASS": "green", "FAIL": "red", "High Latency": "yellow"}
-
-fig = px.bar(
-    isp_summary_melt,
-    x="ISP Name",
-    y="Count",
-    color="Status",
-    color_discrete_map=color_map,
-    barmode="stack",
-    text="Count"
-)
+fig = px.bar(isp_summary_melt, x="ISP Name", y="Count", color="Status",
+             color_discrete_map=color_map, barmode="stack", text="Count")
 fig.update_layout(yaxis_title="Number of IPs", xaxis_title="ISP Name")
 st.plotly_chart(fig, use_container_width=True)
 
 # =========================
-# Historical Trend
+# Historical ISP Stacked Chart
 # =========================
-st.subheader("📈 Historical PASS / FAIL Trend")
-history_data = []
+st.subheader("📊 Historical ISP Trend (Stacked)")
+
+history_frames = []
 for file in files[::-1]:
     try:
-        s = pd.read_excel(file, sheet_name="Summary")
-        history_data.append({
-            "Timestamp": s.iloc[4,1],
-            "PASS": int(s.iloc[1,1]),
-            "FAIL": int(s.iloc[2,1]),
-            "High Latency": int(s.iloc[3,1])
-        })
+        df_ping = pd.read_excel(file, sheet_name="Ping Report")
+        timestamp = pd.to_datetime(pd.read_excel(file, sheet_name="Summary").loc[
+            lambda x: x["Metric"]=="Report Generated At","Value"].values[0]
+        )
+        df_group = df_ping.groupby(["ISP Name","Status"]).size().unstack(fill_value=0)
+        df_group["High Latency"] = df_ping["Latency (ms)"].apply(
+            lambda x: 1 if x != "N/A" and float(x) > LATENCY_WARNING_THRESHOLD else 0
+        )
+        df_group["Timestamp"] = timestamp
+        history_frames.append(df_group.reset_index())
     except:
         pass
 
-history_df = pd.DataFrame(history_data)
-history_df["Timestamp"] = pd.to_datetime(history_df["Timestamp"])
-history_df = history_df.sort_values("Timestamp")
-
-st.line_chart(history_df.set_index("Timestamp")[["PASS", "FAIL"]])
-st.subheader("🟡 High Latency Trend")
-st.line_chart(history_df.set_index("Timestamp")[["High Latency"]])
+if history_frames:
+    history_df = pd.concat(history_frames, ignore_index=True)
+    history_melt = history_df.melt(id_vars=["ISP Name","Timestamp"], value_vars=["PASS","FAIL","High Latency"],
+                                   var_name="Status", value_name="Count")
+    fig_hist = px.bar(history_melt, x="Timestamp", y="Count", color="Status",
+                      color_discrete_map=color_map, barmode="stack", facet_col="ISP Name",
+                      facet_col_wrap=2, text="Count")
+    fig_hist.update_layout(yaxis_title="Number of IPs", xaxis_title="Timestamp")
+    st.plotly_chart(fig_hist, use_container_width=True)
 
 st.caption(f"Last Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
